@@ -14,48 +14,39 @@ import (
 
 // ProxyServer is the main proxy server that aggregates multiple MCP backends.
 type ProxyServer struct {
-	cfg            *config.Config
-	sessionMgr     *SessionManager
-	dispatcher     *Dispatcher
-	mcpServer      *server.MCPServer
-	httpServer     *http.Server
-	caps           *AggregatedCapabilities
-	addr           string
-	sessionTimeout time.Duration
+	sharedSession *ProxySession
+	dispatcher    *Dispatcher
+	mcpServer     *server.MCPServer
+	httpServer    *http.Server
+	addr          string
 }
 
 // ProxyServerConfig holds configuration for creating a ProxyServer.
 type ProxyServerConfig struct {
-	Config         *config.Config
-	Addr           string
-	SessionTimeout time.Duration
+	Config *config.Config
+	Addr   string
 }
 
 // NewProxyServer creates and configures a new proxy server.
 func NewProxyServer(psc *ProxyServerConfig) (*ProxyServer, error) {
-	ps := &ProxyServer{
-		cfg:            psc.Config,
-		addr:           psc.Addr,
-		sessionTimeout: psc.SessionTimeout,
-	}
+	// Create shared session: connect backends and discover capabilities in one step
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// Bootstrap: create temporary connections to discover capabilities
-	caps, err := ps.bootstrap()
+	session, err := CreateSharedSession(ctx, psc.Config)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap: %w", err)
+		return nil, fmt.Errorf("create shared session: %w", err)
 	}
-	ps.caps = caps
-	ps.dispatcher = NewDispatcher(caps)
-	ps.sessionMgr = NewSessionManager(psc.Config, psc.SessionTimeout)
 
-	// Create MCP server with hooks
-	hooks := &server.Hooks{}
-	hooks.AddOnRegisterSession(ps.onRegisterSession)
-	hooks.AddOnUnregisterSession(ps.onUnregisterSession)
-
-	opts := []server.ServerOption{
-		server.WithHooks(hooks),
+	caps := session.Caps
+	ps := &ProxyServer{
+		sharedSession: session,
+		dispatcher:    NewDispatcher(caps),
+		addr:          psc.Addr,
 	}
+
+	// Create MCP server
+	var opts []server.ServerOption
 	if len(caps.Tools) > 0 {
 		opts = append(opts, server.WithToolCapabilities(true))
 	}
@@ -68,181 +59,43 @@ func NewProxyServer(psc *ProxyServerConfig) (*ProxyServer, error) {
 
 	ps.mcpServer = server.NewMCPServer("mcp-proxy", "1.0.0", opts...)
 
-	// Register prompts globally (since AddSessionPrompt doesn't exist)
+	// Register tools globally (shared across all clients)
+	for proxyName, tm := range caps.Tools {
+		ps.mcpServer.AddTool(tm.Tool, ps.makeToolHandler(proxyName))
+	}
+
+	// Register resources globally
+	for _, rm := range caps.Resources {
+		ps.mcpServer.AddResource(rm.Resource, ps.makeResourceHandler(rm.Resource.URI))
+	}
+
+	// Register prompts globally
 	for _, pm := range caps.Prompts {
-		proxyName := pm.Prompt.Name
-		ps.mcpServer.AddPrompt(pm.Prompt, ps.makePromptHandler(proxyName))
+		ps.mcpServer.AddPrompt(pm.Prompt, ps.makePromptHandler(pm.Prompt.Name))
 	}
 
 	return ps, nil
 }
 
-// bootstrap creates temporary connections to each backend to discover capabilities.
-func (ps *ProxyServer) bootstrap() (*AggregatedCapabilities, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var servers []ServerCapabilities
-	for name, sc := range ps.cfg.MCPServers {
-		slog.Info("bootstrapping backend", "server", name)
-
-		caps, err := ps.bootstrapServer(ctx, name, sc)
-		if err != nil {
-			slog.Error("bootstrap failed, skipping server", "server", name, "error", err)
-			continue
-		}
-		servers = append(servers, *caps)
-	}
-
-	if len(servers) == 0 {
-		return nil, fmt.Errorf("no backends available after bootstrap")
-	}
-
-	return Aggregate(servers), nil
-}
-
-func (ps *ProxyServer) bootstrapServer(ctx context.Context, name string, sc *config.ServerConfig) (*ServerCapabilities, error) {
-	var b interface {
-		Initialize(context.Context) (*mcp.InitializeResult, error)
-		Close() error
-	}
-
-	// Import backend package for creating bootstrap connections
-	bk, err := newBootstrapBackend(ctx, name, sc)
-	if err != nil {
-		return nil, err
-	}
-	b = bk
-	defer b.Close()
-
-	initResult, err := b.Initialize(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("initialize: %w", err)
-	}
-
-	caps := &ServerCapabilities{Name: name}
-
-	if initResult.Capabilities.Tools != nil {
-		tools, err := ListBackendTools(ctx, bk.Client)
-		if err != nil {
-			slog.Warn("failed to list tools", "server", name, "error", err)
-		} else {
-			caps.Tools = tools
-		}
-	}
-
-	if initResult.Capabilities.Resources != nil {
-		resources, err := ListBackendResources(ctx, bk.Client)
-		if err != nil {
-			slog.Warn("failed to list resources", "server", name, "error", err)
-		} else {
-			caps.Resources = resources
-		}
-	}
-
-	if initResult.Capabilities.Prompts != nil {
-		prompts, err := ListBackendPrompts(ctx, bk.Client)
-		if err != nil {
-			slog.Warn("failed to list prompts", "server", name, "error", err)
-		} else {
-			caps.Prompts = prompts
-		}
-	}
-
-	slog.Info("bootstrap complete", "server", name,
-		"tools", len(caps.Tools),
-		"resources", len(caps.Resources),
-		"prompts", len(caps.Prompts))
-
-	return caps, nil
-}
-
-func (ps *ProxyServer) onRegisterSession(ctx context.Context, session server.ClientSession) {
-	sessionID := session.SessionID()
-	slog.Info("registering session", "session", sessionID)
-
-	proxySession, err := ps.sessionMgr.CreateSession(ctx, sessionID)
-	if err != nil {
-		slog.Error("failed to create session", "session", sessionID, "error", err)
-		return
-	}
-
-	// Register session-specific tools
-	for proxyName, tm := range ps.caps.Tools {
-		tool := tm.Tool
-		handler := ps.makeToolHandler(proxyName)
-		if err := ps.mcpServer.AddSessionTool(sessionID, tool, handler); err != nil {
-			slog.Error("failed to add session tool", "session", sessionID, "tool", proxyName, "error", err)
-		}
-	}
-
-	// Register session-specific resources
-	for _, rm := range ps.caps.Resources {
-		handler := ps.makeResourceHandler(rm.Resource.URI)
-		if err := ps.mcpServer.AddSessionResource(sessionID, rm.Resource, handler); err != nil {
-			slog.Error("failed to add session resource", "session", sessionID, "resource", rm.Resource.URI, "error", err)
-		}
-	}
-
-	_ = proxySession // already stored in session manager
-}
-
-func (ps *ProxyServer) onUnregisterSession(ctx context.Context, session server.ClientSession) {
-	sessionID := session.SessionID()
-	slog.Info("unregistering session", "session", sessionID)
-	ps.sessionMgr.DestroySession(sessionID)
-}
-
 func (ps *ProxyServer) makeToolHandler(proxyName string) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := server.ClientSessionFromContext(ctx)
-		if session == nil {
-			return mcp.NewToolResultError("no session"), nil
-		}
-
-		proxySession, ok := ps.sessionMgr.GetSession(session.SessionID())
-		if !ok {
-			return mcp.NewToolResultError("session not found"), nil
-		}
-
-		return ps.dispatcher.CallTool(ctx, proxySession, proxyName, req.GetArguments())
+		return ps.dispatcher.CallTool(ctx, ps.sharedSession, proxyName, req.GetArguments())
 	}
 }
 
 func (ps *ProxyServer) makeResourceHandler(uri string) server.ResourceHandlerFunc {
 	return func(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-		session := server.ClientSessionFromContext(ctx)
-		if session == nil {
-			return nil, fmt.Errorf("no session")
-		}
-
-		proxySession, ok := ps.sessionMgr.GetSession(session.SessionID())
-		if !ok {
-			return nil, fmt.Errorf("session not found")
-		}
-
-		result, err := ps.dispatcher.ReadResource(ctx, proxySession, uri)
+		result, err := ps.dispatcher.ReadResource(ctx, ps.sharedSession, uri)
 		if err != nil {
 			return nil, err
 		}
-
 		return result.Contents, nil
 	}
 }
 
 func (ps *ProxyServer) makePromptHandler(proxyName string) server.PromptHandlerFunc {
 	return func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-		session := server.ClientSessionFromContext(ctx)
-		if session == nil {
-			return nil, fmt.Errorf("no session")
-		}
-
-		proxySession, ok := ps.sessionMgr.GetSession(session.SessionID())
-		if !ok {
-			return nil, fmt.Errorf("session not found")
-		}
-
-		return ps.dispatcher.GetPrompt(ctx, proxySession, proxyName, req.Params.Arguments)
+		return ps.dispatcher.GetPrompt(ctx, ps.sharedSession, proxyName, req.Params.Arguments)
 	}
 }
 
@@ -268,10 +121,11 @@ func (ps *ProxyServer) Start() error {
 		Handler: mux,
 	}
 
+	caps := ps.sharedSession.Caps
 	slog.Info("starting proxy server", "addr", ps.addr,
-		"tools", len(ps.caps.Tools),
-		"resources", len(ps.caps.Resources),
-		"prompts", len(ps.caps.Prompts))
+		"tools", len(caps.Tools),
+		"resources", len(caps.Resources),
+		"prompts", len(caps.Prompts))
 
 	return ps.httpServer.ListenAndServe()
 }
@@ -279,6 +133,7 @@ func (ps *ProxyServer) Start() error {
 // Shutdown gracefully shuts down the proxy server.
 func (ps *ProxyServer) Shutdown(ctx context.Context) error {
 	slog.Info("shutting down proxy server")
-	ps.sessionMgr.Shutdown()
-	return ps.httpServer.Shutdown(ctx)
+	err := ps.httpServer.Shutdown(ctx)
+	ps.sharedSession.Close()
+	return err
 }

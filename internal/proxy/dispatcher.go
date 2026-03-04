@@ -19,8 +19,6 @@ func NewDispatcher(caps *AggregatedCapabilities) *Dispatcher {
 
 // CallTool dispatches a tool call to the appropriate backend.
 func (d *Dispatcher) CallTool(ctx context.Context, session *ProxySession, proxyName string, arguments map[string]interface{}) (*mcp.CallToolResult, error) {
-	session.Touch()
-
 	mapping, ok := d.caps.Tools[proxyName]
 	if !ok {
 		return nil, fmt.Errorf("unknown tool: %s", proxyName)
@@ -45,8 +43,6 @@ func (d *Dispatcher) CallTool(ctx context.Context, session *ProxySession, proxyN
 
 // ReadResource dispatches a resource read to the appropriate backend.
 func (d *Dispatcher) ReadResource(ctx context.Context, session *ProxySession, uri string) (*mcp.ReadResourceResult, error) {
-	session.Touch()
-
 	mapping, ok := d.caps.Resources[uri]
 	if !ok {
 		return nil, fmt.Errorf("unknown resource: %s", uri)
@@ -65,8 +61,6 @@ func (d *Dispatcher) ReadResource(ctx context.Context, session *ProxySession, ur
 
 // GetPrompt dispatches a prompt request to the appropriate backend.
 func (d *Dispatcher) GetPrompt(ctx context.Context, session *ProxySession, proxyName string, arguments map[string]string) (*mcp.GetPromptResult, error) {
-	session.Touch()
-
 	mapping, ok := d.caps.Prompts[proxyName]
 	if !ok {
 		return nil, fmt.Errorf("unknown prompt: %s", proxyName)
