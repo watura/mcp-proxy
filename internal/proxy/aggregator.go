@@ -39,7 +39,7 @@ type ServerCapabilities struct {
 	Prompts   []mcp.Prompt
 }
 
-// Aggregate merges capabilities from multiple backends, resolving tool/prompt name conflicts.
+// Aggregate merges capabilities from multiple backends, prefixing tool/prompt names with the server name.
 func Aggregate(servers []ServerCapabilities) *AggregatedCapabilities {
 	agg := &AggregatedCapabilities{
 		Tools:     make(map[string]ToolMapping),
@@ -47,8 +47,8 @@ func Aggregate(servers []ServerCapabilities) *AggregatedCapabilities {
 		Prompts:   make(map[string]PromptMapping),
 	}
 
-	agg.Tools = resolveToolConflicts(servers)
-	agg.Prompts = resolvePromptConflicts(servers)
+	agg.Tools = prefixTools(servers)
+	agg.Prompts = prefixPrompts(servers)
 
 	// Resources are keyed by URI, no conflict resolution needed
 	for _, srv := range servers {
@@ -63,31 +63,11 @@ func Aggregate(servers []ServerCapabilities) *AggregatedCapabilities {
 	return agg
 }
 
-func resolveToolConflicts(servers []ServerCapabilities) map[string]ToolMapping {
-	// Step 1: build map[toolName][]serverName
-	nameToServers := make(map[string][]string)
-	for _, srv := range servers {
-		for _, tool := range srv.Tools {
-			nameToServers[tool.Name] = append(nameToServers[tool.Name], srv.Name)
-		}
-	}
-
-	// Step 2: determine conflicting names
-	conflicting := make(map[string]bool)
-	for name, srvs := range nameToServers {
-		if len(srvs) > 1 {
-			conflicting[name] = true
-		}
-	}
-
-	// Step 3: build result
+func prefixTools(servers []ServerCapabilities) map[string]ToolMapping {
 	result := make(map[string]ToolMapping)
 	for _, srv := range servers {
 		for _, tool := range srv.Tools {
-			proxyName := tool.Name
-			if conflicting[tool.Name] {
-				proxyName = srv.Name + "__" + tool.Name
-			}
+			proxyName := srv.Name + "__" + tool.Name
 			prefixed := tool
 			prefixed.Name = proxyName
 			result[proxyName] = ToolMapping{
@@ -101,28 +81,11 @@ func resolveToolConflicts(servers []ServerCapabilities) map[string]ToolMapping {
 	return result
 }
 
-func resolvePromptConflicts(servers []ServerCapabilities) map[string]PromptMapping {
-	nameToServers := make(map[string][]string)
-	for _, srv := range servers {
-		for _, prompt := range srv.Prompts {
-			nameToServers[prompt.Name] = append(nameToServers[prompt.Name], srv.Name)
-		}
-	}
-
-	conflicting := make(map[string]bool)
-	for name, srvs := range nameToServers {
-		if len(srvs) > 1 {
-			conflicting[name] = true
-		}
-	}
-
+func prefixPrompts(servers []ServerCapabilities) map[string]PromptMapping {
 	result := make(map[string]PromptMapping)
 	for _, srv := range servers {
 		for _, prompt := range srv.Prompts {
-			proxyName := prompt.Name
-			if conflicting[prompt.Name] {
-				proxyName = srv.Name + "__" + prompt.Name
-			}
+			proxyName := srv.Name + "__" + prompt.Name
 			prefixed := prompt
 			prefixed.Name = proxyName
 			result[proxyName] = PromptMapping{

@@ -23,7 +23,7 @@ func TestAggregateNoConflicts(t *testing.T) {
 	if len(agg.Tools) != 3 {
 		t.Fatalf("expected 3 tools, got %d", len(agg.Tools))
 	}
-	for _, name := range []string{"tool1", "tool2", "tool3"} {
+	for _, name := range []string{"server-a__tool1", "server-a__tool2", "server-b__tool3"} {
 		if _, ok := agg.Tools[name]; !ok {
 			t.Errorf("expected tool %q in result", name)
 		}
@@ -54,11 +54,11 @@ func TestAggregateWithConflicts(t *testing.T) {
 	if _, ok := agg.Tools["server-b__read"]; !ok {
 		t.Error("expected 'server-b__read' in result")
 	}
-	if _, ok := agg.Tools["unique-a"]; !ok {
-		t.Error("expected 'unique-a' in result")
+	if _, ok := agg.Tools["server-a__unique-a"]; !ok {
+		t.Error("expected 'server-a__unique-a' in result")
 	}
-	if _, ok := agg.Tools["unique-b"]; !ok {
-		t.Error("expected 'unique-b' in result")
+	if _, ok := agg.Tools["server-b__unique-b"]; !ok {
+		t.Error("expected 'server-b__unique-b' in result")
 	}
 
 	// Verify original name is preserved
