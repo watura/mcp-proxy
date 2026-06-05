@@ -2,4 +2,6 @@
 # Dolt database files (added by bd init)
 .dolt/
 *.db
-mcp-proxy
+
+# Build output (repo-root binary only, not cmd/mcp-proxy source)
+/mcp-proxy
