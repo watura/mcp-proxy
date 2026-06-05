@@ -130,6 +130,18 @@ func (ps *ProxyServer) Start() error {
 	return ps.httpServer.ListenAndServe()
 }
 
+// ServeStdio serves the aggregated MCP server over stdin/stdout (JSON-RPC).
+// It blocks until stdin is closed, then closes the shared backend session.
+func (ps *ProxyServer) ServeStdio() error {
+	caps := ps.sharedSession.Caps
+	slog.Info("serving over stdio",
+		"tools", len(caps.Tools),
+		"resources", len(caps.Resources),
+		"prompts", len(caps.Prompts))
+	defer ps.sharedSession.Close()
+	return server.ServeStdio(ps.mcpServer)
+}
+
 // Shutdown gracefully shuts down the proxy server.
 func (ps *ProxyServer) Shutdown(ctx context.Context) error {
 	slog.Info("shutting down proxy server")
