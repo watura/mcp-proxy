@@ -1,4 +1,5 @@
 {
+  "port": 39847,
   "mcpServers": {
     "xcode": {
       "command": "xcrun",

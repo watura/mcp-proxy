@@ -49,7 +49,12 @@ func (sc *ServerConfig) EnvList() []string {
 }
 
 // Config represents the top-level mcp.json configuration.
+//
+// Addr and Port are optional. When either is set, the proxy serves over HTTP
+// on that address/port; explicit --addr/--port flags still take precedence.
 type Config struct {
+	Addr       string                   `json:"addr,omitempty"`
+	Port       int                      `json:"port,omitempty"`
 	MCPServers map[string]*ServerConfig `json:"mcpServers"`
 }
 

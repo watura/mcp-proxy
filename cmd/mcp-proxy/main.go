@@ -1,9 +1,11 @@
 // Command mcp-proxy aggregates multiple backend MCP servers defined in an
 // mcp.json config file and exposes them through a single endpoint.
 //
-// When invoked with only --config (no --port/--addr), it serves over stdio
-// so an MCP client can launch the binary directly. When --port or --addr is
-// given explicitly, it serves over HTTP (SSE + Streamable HTTP).
+// When invoked with only --config (no --port/--addr and no addr/port in the
+// config), it serves over stdio so an MCP client can launch the binary
+// directly. When --port/--addr is given explicitly, or "addr"/"port" is set in
+// mcp.json, it serves over HTTP (SSE + Streamable HTTP). Explicit flags take
+// precedence over the config values.
 package main
 
 import (
@@ -45,17 +47,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Resolve listen address and HTTP mode. Precedence: explicit --addr/--port
+	// flags win, then mcp.json's addr/port, otherwise stdio mode.
+	listenAddr, listenPort := *addr, *port
+	httpMode := flagPassed("addr") || flagPassed("port")
+	if !flagPassed("addr") && cfg.Addr != "" {
+		listenAddr = cfg.Addr
+		httpMode = true
+	}
+	if !flagPassed("port") && cfg.Port != 0 {
+		listenPort = cfg.Port
+		httpMode = true
+	}
+
 	ps, err := proxy.NewProxyServer(&proxy.ProxyServerConfig{
 		Config: cfg,
-		Addr:   net.JoinHostPort(*addr, strconv.Itoa(*port)),
+		Addr:   net.JoinHostPort(listenAddr, strconv.Itoa(listenPort)),
 	})
 	if err != nil {
 		slog.Error("failed to create proxy server", "error", err)
 		os.Exit(1)
 	}
 
-	// stdio mode unless an HTTP flag (--port/--addr) was explicitly provided.
-	if !httpFlagsSet() {
+	// stdio mode unless an HTTP address was configured (via flag or mcp.json).
+	if !httpMode {
 		if err := ps.ServeStdio(); err != nil {
 			slog.Error("stdio server error", "error", err)
 			os.Exit(1)
@@ -66,15 +81,15 @@ func main() {
 	runHTTP(ps)
 }
 
-// httpFlagsSet reports whether --port or --addr was explicitly passed.
-func httpFlagsSet() bool {
-	set := false
+// flagPassed reports whether the named flag was explicitly provided on the CLI.
+func flagPassed(name string) bool {
+	passed := false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "port" || f.Name == "addr" {
-			set = true
+		if f.Name == name {
+			passed = true
 		}
 	})
-	return set
+	return passed
 }
 
 // runHTTP starts the HTTP server and shuts it down gracefully on SIGINT/SIGTERM.

@@ -29,12 +29,16 @@ mcp-proxy --config mcp.json --port 8080
 | `--addr` | `127.0.0.1` | リッスンアドレス |
 | `--log-level` | `info` | ログレベル (debug/info/warn/error) |
 
+`--port` / `--addr` は mcp.json のトップレベル `port` / `addr` でも指定できます（下記）。フラグを明示した場合はフラグが優先されます。`--port` も `--addr` も mcp.json の `port` / `addr` も無い場合は stdio モードになります。
+
 ## 設定ファイル (mcp.json)
 
-プロキシが接続するバックエンドMCPサーバーを定義します。
+プロキシが接続するバックエンドMCPサーバーを定義します。トップレベルに `port` / `addr` を書くと、フラグなしでも HTTP モードで起動します。
 
 ```json
 {
+  "port": 8080,
+  "addr": "127.0.0.1",
   "mcpServers": {
     "server-a": {
       "command": "npx",
